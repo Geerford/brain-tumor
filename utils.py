@@ -23,18 +23,23 @@ def set_seed(seed):
         torch.backends.cudnn.deterministic = True
 
 
-def transform_sample(sample, transform, size, mode):
-    pad_size = 256 if size > 256 else 224
+def transform_sample(sample, transform, size, grayscale):
+    if grayscale:
+        sample = np.asarray(ImageOps.grayscale(sample))
+        in_channels = 1
+    else:
+        sample = np.asarray(sample)
+        in_channels = 3
+    # pad_size = 256 if size > 256 else 224
     resize_image = A.Compose([
-        A.PadIfNeeded(min_height=pad_size, min_width=pad_size, value=0),
+        # A.PadIfNeeded(min_height=pad_size, min_width=pad_size, value=0),
         A.Resize(size, size)
     ])
     sample = resize_image(image=sample)['image']
-    if mode == 'grayscale':
-        sample = ImageOps.grayscale(sample)
+    sample = sample.reshape(in_channels, sample.shape[0], sample.shape[1])
     if transform:
-        normalize = A.Normalize(mean=[0.5], std=[0.5]) if mode == 'grayscale' else A.Normalize(mean=[0.485, 0.456, 0.406],
-                                                                                               std=[0.229, 0.224, 0.225])
+        normalize = A.Normalize(mean=[0.5], std=[0.5]) if grayscale else A.Normalize(mean=[0.485, 0.456, 0.406],
+                                                                                     std=[0.229, 0.224, 0.225])
         transform_image = A.Compose([
             A.HorizontalFlip(p=0.5),
             A.OneOf([
@@ -58,21 +63,24 @@ def read_image(path):
     # else:
         # sample = cv2.imread(path)
     # return cv2.resize(sample, (size, size))
-    return np.asarray(Image.open(path))
+    return Image.open(path)
 
 
 def load_seq_samples(seq_path, params: dict):
     samples = torch.stack(
-        [transform_sample(read_image(item_path), params['transform'], params['input_size'], params['image_read_mode'])
+        [transform_sample(read_image(item_path), params['transform'], params['input_size'], params['grayscale'])
          for item_path in seq_path])
-    # if len(samples) == 0:
-    #     samples = np.zeros((params['num_images_seq'], params['input_size'], params['input_size']))
-    # elif len(samples) < params['num_images_seq']:
-    #     samples = np.concatenate((samples, np.zeros((params['num_images_seq'] - len(samples),
-    #                                                  params['input_size'], params['input_size']))))
-    # elif len(samples) > params['num_images_seq']:
-    #     samples = samples[len(samples) // 2 - (int(params['num_images_seq'] / 2)):
-    #                       len(samples) // 2 + (int(params['num_images_seq'] / 2))]
+    if params['num_images_seq'] == -1:
+        samples = samples[len(samples) // 2]
+    elif len(samples) == 0:
+        samples = np.zeros((params['num_images_seq'], params['input_size'], params['input_size']))
+    elif len(samples) < params['num_images_seq']:
+        samples = np.concatenate((samples, np.zeros((params['num_images_seq'] - len(samples),
+                                                     params['input_size'], params['input_size']))))
+    elif len(samples) > params['num_images_seq']:
+        samples = samples[len(samples) // 2 - (int(params['num_images_seq'] / 2)):
+                          len(samples) // 2 + (int(params['num_images_seq'] / 2))]
+
     return samples
 
 

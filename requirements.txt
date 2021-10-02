@@ -11,6 +11,7 @@ pretrainedmodels==0.7.4
 efficientnet-pytorch==0.7.1
 tqdm==4.62.3
 plotly==5.3.1
+PyYAML==5.4.1
 
 wandb==0.12.2
 torchio==0.18.56

@@ -94,7 +94,7 @@ def efficientnet(params):
         types = ['efficientnet-b0', 'efficientnet-b2', 'efficientnet-b3', 'efficientnet-b4', 'efficientnet-b5',
                 'efficientnet-b6', 'efficientnet-b7']
     """
-    return EfficientNet.from_pretrained(params['model_type'], num_classes=params['numClasses'])
+    return EfficientNet.from_pretrained(params['model_type'], num_classes=params['num_classes'], in_channels=params['input_channels'])
 
 
 def efficientnet_3d(params):

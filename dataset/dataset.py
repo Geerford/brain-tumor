@@ -34,7 +34,7 @@ class BrainTumorDataset(torch.utils.data.Dataset):
         samples = load_samples(path=self.root_dir + self.ids[idx],
                                params=self.params)
         if self.params['type'] == 'test':
-            return torch.tensor(samples).float(), idx
+            return samples.float(), idx
         else:
-            return torch.tensor(samples).float(), torch.tensor(
+            return samples.float(), torch.tensor(
                 self.labels.loc[self.labels['BraTS21ID'] == int(self.ids[idx])].values[0][1], dtype=torch.long)

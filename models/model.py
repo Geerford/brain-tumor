@@ -4,14 +4,17 @@ import numpy as np
 import pandas as pd
 import torch
 import wandb
+import yaml
 from sklearn.metrics import roc_auc_score
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, KFold
 from torch import nn, optim
 from torch.optim import lr_scheduler
 from torch.utils import data
+from torch.utils.data import ConcatDataset, SubsetRandomSampler
 from tqdm import tqdm
 
 from dataset.dataset import BrainTumorDataset
+from main import save_yaml
 from models import model_list
 
 
@@ -72,7 +75,7 @@ def create_optimizer(model, params: dict):
 def create_scheduler(optimizer, params: dict):
     gamma = 1 / np.float32(params['lr_step'])
     if params['schedule_type'] == 'StepLR':
-        return lr_scheduler.StepLR(optimizer, step_size=params['lower_lr_after'], gamma=gamma)
+        return lr_scheduler.StepLR(optimizer, step_size=params['step_size'], gamma=gamma)
     elif params['schedule_type'] == 'MultiStepLR':
         return lr_scheduler.MultiStepLR(optimizer, gamma=gamma)
     elif params['schedule_type'] == 'CyclicLR':
@@ -81,7 +84,66 @@ def create_scheduler(optimizer, params: dict):
         return lr_scheduler.ExponentialLR(optimizer, gamma=gamma)
 
 
-def train_val_model(params: dict):
+def train_epoch(model, loader, criterion, optimizer):
+    model.train()
+
+    train_loss, train_correct = 0.0, 0
+    train_labels, train_outputs = [], []
+
+    for images, labels in loader:
+        images, labels = images.cuda(), labels.cuda()
+
+        optimizer.zero_grad()
+        output = model(images)
+        loss = criterion(output, labels)
+        loss.backward()
+        optimizer.step()
+
+        scores, predictions = torch.max(output.data, 1)
+        batch_loss = loss.item() * images.size(0)
+        train_loss += batch_loss
+        batch_correct = sum(predictions == labels).item()
+        train_correct += batch_correct
+
+        train_labels.extend(labels.tolist())
+        train_outputs.extend(output.tolist())
+        wandb.log({"train batch loss": batch_loss})
+        wandb.log({"train batch correct": batch_correct})
+
+    train_roc = roc_auc_score([[1, 0] if a_i == 0 else [0, 1] for a_i in train_labels], train_outputs)
+
+    return train_loss, train_correct, train_roc
+
+
+def valid_epoch(model, loader, criterion, optimizer):
+    model.eval()
+
+    valid_loss, valid_correct = 0.0, 0
+    valid_labels, valid_outputs = [], []
+
+    for images, labels in loader:
+        images, labels = images.cuda(), labels.cuda()
+
+        optimizer.zero_grad()
+        output = model(images)
+        loss = criterion(output, labels)
+
+        scores, predictions = torch.max(output.data, 1)
+        batch_loss = loss.item() * images.size(0)
+        valid_loss += batch_loss
+        batch_correct = sum(predictions == labels).item()
+        valid_correct += batch_correct
+
+        valid_labels.extend(labels.tolist())
+        valid_outputs.extend(output.tolist())
+        wandb.log({"valid batch loss": batch_loss})
+        wandb.log({"valid batch correct": batch_correct})
+
+    valid_roc = roc_auc_score([[1, 0] if a_i == 0 else [0, 1] for a_i in valid_labels], valid_outputs)
+    return valid_loss, valid_correct, valid_roc
+
+
+def cross_validation(params: dict):
     df_labels = pd.read_csv(f"{params['data_directory']}/{params['csv']}")
     # Issues id
     for ids in [109, 123, 709]:
@@ -97,116 +159,102 @@ def train_val_model(params: dict):
     train_dataset = BrainTumorDataset(
         labels=df_train,
         root_dir=params['train_directory'],
-        params=params)
-    val_dataset = BrainTumorDataset(
+        params=params
+    )
+    valid_dataset = BrainTumorDataset(
         labels=df_val,
         root_dir=params['train_directory'],
-        params=params)
-    print(f"Train dataset length: {len(train_dataset)}; Validation dataset length: {len(val_dataset)}")
-    train_loader = torch.utils.data.DataLoader(
-        train_dataset,
-        batch_size=params['train_batch_size'],
-        num_workers=params['num_workers'],
-        pin_memory=params['pin_memory'],
-        shuffle=params['train_shuffle'],
-        drop_last=params['train_drop_last'])
-    val_loader = torch.utils.data.DataLoader(
-        val_dataset,
-        batch_size=params['test_batch_size'],
-        num_workers=params['num_workers'],
-        pin_memory=params['pin_memory'],
-        shuffle=params['test_shuffle'],
-        drop_last=params['test_drop_last'])
+        params=params
+    )
+    dataset = ConcatDataset([train_dataset, valid_dataset])
 
-    params['schedule_max_iter'] = len(train_loader)
-
-    model = model_list.efficientnet_3d(params).cuda()
+    model = model_list.efficientnet(params).cuda()
     criterion = nn.CrossEntropyLoss()
     optimizer = create_optimizer(model, params)
     scheduler = create_scheduler(optimizer, params)
 
-    best_roc = 0.0
-    for epoch in tqdm(range(params['epochs']), desc='Epoch'):
-        ################################################################################################################
-        # Train
-        ################################################################################################################
-        model.train()
+    folds_history = {}
+    for fold, (train_idx, valid_idx) in enumerate(KFold(n_splits=params['k_fold'], shuffle=True,
+                                                        random_state=params['seed']).split(np.arange(len(dataset)))):
+        wandb.init(
+            project="RSNA-MICCAI",
+            tags=["effnetb0"],
+            group="cross-validation",
+            job_type=f"fold{fold + 1}",
+            config=params)
+        print(f'\033[4mFold {fold + 1}\033[0m')
+        train_sampler = SubsetRandomSampler(train_idx)
+        test_sampler = SubsetRandomSampler(valid_idx)
+        train_loader = torch.utils.data.DataLoader(dataset,
+                                                   batch_size=params['train_batch_size'],
+                                                   sampler=train_sampler)
+        valid_loader = torch.utils.data.DataLoader(dataset, batch_size=params['test_batch_size'], sampler=test_sampler)
 
-        train_roc = 0.0
-        train_labels = []
-        train_outputs = []
-        train_loss = []
-        for inputs, labels in train_loader:
-            inputs = inputs.cuda()
-            labels = labels.cuda()
+        history = {
+            'train_loss': [],
+            'valid_loss': [],
+            'train_acc': [],
+            'valid_acc': [],
+            'train_roc': [],
+            'valid_roc': []
+        }
 
-            optimizer.zero_grad()
-            outputs = model(inputs)
-            loss = criterion(outputs, labels)
+        best_roc = 0.0
+        print(f'\n\033[4m{"Epoch": <50}{"Loss": >42}{"Accuracy": >10}{"ROC": >5}{"": <1}\033[0m')
+        for epoch in range(params['epochs']):
+            train_loss, train_correct, train_roc = train_epoch(model, train_loader, criterion, optimizer)
+            train_loss = train_loss / len(train_loader.sampler)
+            train_acc = train_correct / len(train_loader.sampler) * 100
+            print(f'train_{epoch + 1:<50}{train_loss:>36.3f},{train_acc:>8.3f},{train_roc:>6.3f}')
+            valid_loss, valid_correct, valid_roc = valid_epoch(model, valid_loader, criterion, optimizer)
+            valid_loss = valid_loss / len(valid_loader.sampler)
+            valid_acc = valid_correct / len(valid_loader.sampler) * 100
+            print(f'valid_{epoch + 1:<50}{valid_loss:>36.3f},{valid_acc:>8.3f},{valid_roc:>6.3f}')
+            scheduler.step()
 
-            loss.backward()
-            optimizer.step()
+            history['train_epoch_loss'].append(train_loss)
+            history['valid_epoch_loss'].append(valid_loss)
+            history['train_epoch_acc'].append(train_acc)
+            history['valid_epoch_acc'].append(valid_acc)
+            history['train_epoch_roc'].append(train_roc)
+            history['valid_epoch_roc'].append(valid_roc)
 
-            train_labels.extend(labels.tolist())
-            train_outputs.extend(outputs.tolist())
-            train_loss.append(loss.item())
+            folds_history[f'fold_{fold}'] = history
+            wandb.config.update(folds_history[f'fold_{fold}'])
 
-            wandb.log({"train batch loss": loss.item()})
-        train_roc += roc_auc_score([[1, 0] if a_i == 0 else [0, 1] for a_i in train_labels], train_outputs)
-        wandb.log({"train epoch loss": sum(train_loss) / params['train_batch_size']})
-        print(f"Epoch: {epoch}. Train loss: {sum(train_loss) / params['train_batch_size']}. Train ROC: {train_roc}")
-        ################################################################################################################
-        # Validation
-        ################################################################################################################
-        model.eval()
-
-        val_roc = 0.0
-        val_labels = []
-        val_outputs = []
-        val_loss = []
-        for inputs, labels in val_loader:
-            inputs = inputs.cuda()
-            labels = labels.cuda()
-
-            optimizer.zero_grad()
-            outputs = model(inputs)
-            loss = criterion(outputs, labels)
-
-            val_labels.extend(labels.tolist())
-            val_outputs.extend(outputs.tolist())
-            val_loss.append(loss.item())
-
-            wandb.log({"val batch loss": loss.item()})
-        val_roc += roc_auc_score([[1, 0] if a_i == 0 else [0, 1] for a_i in val_labels], val_outputs)
-        wandb.log({"val epoch loss": sum(val_loss)})
-        print(f'Epoch: {epoch}. Val loss: {sum(val_loss)}. Val ROC: {val_roc}')
-
-        scheduler.step()
-
-        ################################################################################################################
-        # Save
-        ################################################################################################################
-        params['last_checkpoint'] = epoch
-        torch.save(model.state_dict(),
-                   os.path.join(params['save_directory'], f"{params['model_type']}_checkpoint_{epoch}.pt"))
-
-        # best model
-        if val_roc > best_roc:
-            best_roc = val_roc
+            # Save each epoch
+            params.update({
+                'last_checkpoint': epoch
+            })
+            save_yaml(params)
             torch.save(model.state_dict(),
-                       os.path.join(params['save_directory'], f"{params['model_type']}_checkpoint_{epoch}_best.pt"))
+                       os.path.join(params['save_directory'], f"{params['model_type']}_checkpoint_{epoch}_fold_{fold}.pt"))
+
+            # Save best model
+            if valid_roc > best_roc:
+                best_roc = valid_roc
+                torch.save(model.state_dict(),
+                           os.path.join(params['save_directory'], f"{params['model_type']}_checkpoint_{epoch}_fold_{fold}_best.pt"))
+        wandb.log({f"train_fold_loss": np.mean(history['train_epoch_loss'])})
+        wandb.log({f"train_fold_acc": np.mean(history['train_epoch_acc'])})
+        wandb.log({f"train_fold_roc": np.mean(history['train_epoch_roc'])})
+        wandb.log({f"valid_fold_loss": np.mean(history['valid_epoch_loss'])})
+        wandb.log({f"valid_fold_acc": np.mean(history['valid_epoch_acc'])})
+        wandb.log({f"valid_fold_roc": np.mean(history['valid_epoch_roc'])})
+
+        wandb.finish()
     return model
 
 
 def train_val_models(params: dict):
     params['seq_type'] = 'FLAIR'
-    flair_model = train_val_model(params)
+    flair_model = cross_validation(params)
     params['seq_type'] = 'T1w'
-    t1w_model = train_val_model(params)
+    t1w_model = cross_validation(params)
     params['seq_type'] = 'T1wCE'
-    t1wce_model = train_val_model(params)
+    t1wce_model = cross_validation(params)
     params['seq_type'] = 'T2w'
-    t2w_model = train_val_model(params)
+    t2w_model = cross_validation(params)
     return flair_model, t1w_model, t1wce_model, t2w_model
 
 
@@ -246,3 +294,4 @@ def load_model(params: dict):
             preds.append(pred)
     preddf = pd.DataFrame({"BraTS21ID": idxs, "MGMT_value": preds})
     preddf = preddf.set_index("BraTS21ID")
+    return preddf
