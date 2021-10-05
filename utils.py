@@ -3,12 +3,16 @@ import os
 import random
 
 import albumentations as A
+import imageio
 import numpy as np
+import pydicom
 import torch
 import torch.backends.cudnn as cudnn
 # import cv2
+import yaml
 from PIL import Image, ImageOps
 from albumentations.pytorch import ToTensorV2
+from pydicom.pixel_data_handlers.util import apply_voi_lut
 
 
 def set_seed(seed):
@@ -55,15 +59,26 @@ def transform_sample(sample, transform, size, grayscale):
 
 
 def read_image(path):
-    # sample = Image.open(path)
+    dicom = pydicom.read_file(path)
+    sample = apply_voi_lut(dicom.pixel_array, dicom)
+    if dicom.PhotometricInterpretation == "MONOCHROME1":
+        sample = np.amax(sample) - sample
+    sample = sample - np.min(sample)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        sample = sample / np.max(sample)
+    sample = (sample * 255).astype(np.uint8)
+    # Save png to storage
+    png_path = path[:-4] + '.png'
+    imageio.imsave(png_path, sample)
+    # sample = Image.open(png_path)
     # sample = sample.resize((size, size), Image.BILINEAR)
     # if mode == 'grayscale':
     #     # sample = cv2.imread(path, 0)
     #     sample = ImageOps.grayscale(sample)
     # else:
-        # sample = cv2.imread(path)
+    #     sample = cv2.imread(png_path)
     # return cv2.resize(sample, (size, size))
-    return Image.open(path)
+    return Image.open(png_path)
 
 
 def load_seq_samples(seq_path, params: dict):
@@ -104,3 +119,20 @@ def load_samples(path, params: dict):
 
     # return np.concatenate([flair_samples, t1w_samples, t1wce_samples, t2w_samples]).reshape(
     #     len(params['mri_types']), params['num_images_seq'], params['input_size'], params['input_size'])
+
+
+def save_yaml(params: dict):
+    with open('config/config.yaml', 'w') as stream:
+        try:
+            yaml.safe_dump(params, stream, default_flow_style=False)
+        except yaml.YAMLError as e:
+            print(e)
+
+
+def load_yaml():
+    with open("config/config.yaml", "r") as stream:
+        try:
+            params = yaml.safe_load(stream)
+        except yaml.YAMLError as e:
+            print(e)
+    return params

@@ -4,9 +4,8 @@ import numpy as np
 import pandas as pd
 import torch
 import wandb
-import yaml
 from sklearn.metrics import roc_auc_score
-from sklearn.model_selection import train_test_split, KFold
+from sklearn.model_selection import train_test_split, KFold, StratifiedKFold
 from torch import nn, optim
 from torch.optim import lr_scheduler
 from torch.utils import data
@@ -14,8 +13,8 @@ from torch.utils.data import ConcatDataset, SubsetRandomSampler
 from tqdm import tqdm
 
 from dataset.dataset import BrainTumorDataset
-from main import save_yaml
 from models import model_list
+from utils import save_yaml
 
 
 def get_optimizer(init_params: dict, params: dict):
@@ -144,7 +143,8 @@ def valid_epoch(model, loader, criterion, optimizer):
 
 
 def cross_validation(params: dict):
-    df_labels = pd.read_csv(f"{params['data_directory']}/{params['csv']}")
+    df_labels = pd.read_csv(os.path.join(params['data_directory'], params['csv']))
+
     # Issues id
     for ids in [109, 123, 709]:
         df_labels.drop(df_labels[df_labels["BraTS21ID"] == ids].index, inplace=True)
@@ -174,29 +174,41 @@ def cross_validation(params: dict):
     scheduler = create_scheduler(optimizer, params)
 
     folds_history = {}
-    for fold, (train_idx, valid_idx) in enumerate(KFold(n_splits=params['k_fold'], shuffle=True,
-                                                        random_state=params['seed']).split(np.arange(len(dataset)))):
+    if params['fold_type'] == 'StratifiedKFold':
+        splitter = StratifiedKFold(n_splits=params['k_fold'], shuffle=True,
+                                   random_state=params['seed']).split(df_labels['BraTS21ID'], df_labels['MGMT_value'])
+    else:
+        splitter = KFold(n_splits=params['k_fold'], shuffle=True,
+                         random_state=params['seed']).split(np.arange(len(dataset)))
+    for fold, (train_idx, valid_idx) in enumerate(splitter):
         wandb.init(
             project="RSNA-MICCAI",
             tags=["effnetb0"],
-            group="cross-validation",
+            group=params['seq_type'],
+            notes=f"cross-validation each model",
             job_type=f"fold{fold + 1}",
             config=params)
         print(f'\033[4mFold {fold + 1}\033[0m')
         train_sampler = SubsetRandomSampler(train_idx)
-        test_sampler = SubsetRandomSampler(valid_idx)
+        valid_sampler = SubsetRandomSampler(valid_idx)
         train_loader = torch.utils.data.DataLoader(dataset,
                                                    batch_size=params['train_batch_size'],
-                                                   sampler=train_sampler)
-        valid_loader = torch.utils.data.DataLoader(dataset, batch_size=params['test_batch_size'], sampler=test_sampler)
+                                                   sampler=train_sampler,
+                                                   num_workers=params['num_workers'],
+                                                   pin_memory=params['pin_memory'])
+        valid_loader = torch.utils.data.DataLoader(dataset,
+                                                   batch_size=params['test_batch_size'],
+                                                   sampler=valid_sampler,
+                                                   num_workers=params['num_workers'],
+                                                   pin_memory=params['pin_memory'])
 
         history = {
-            'train_loss': [],
-            'valid_loss': [],
-            'train_acc': [],
-            'valid_acc': [],
-            'train_roc': [],
-            'valid_roc': []
+            'train_epoch_loss': [],
+            'valid_epoch_loss': [],
+            'train_epoch_acc': [],
+            'valid_epoch_acc': [],
+            'train_epoch_roc': [],
+            'valid_epoch_roc': []
         }
 
         best_roc = 0.0
@@ -218,23 +230,30 @@ def cross_validation(params: dict):
             history['valid_epoch_acc'].append(valid_acc)
             history['train_epoch_roc'].append(train_roc)
             history['valid_epoch_roc'].append(valid_roc)
-
+            wandb.log({f"train_epoch_loss": train_loss})
+            wandb.log({f"train_epoch_acc": train_acc})
+            wandb.log({f"train_epoch_roc": train_roc})
+            wandb.log({f"valid_epoch_loss": valid_loss})
+            wandb.log({f"valid_epoch_acc": valid_acc})
+            wandb.log({f"valid_epoch_roc": valid_roc})
             folds_history[f'fold_{fold}'] = history
-            wandb.config.update(folds_history[f'fold_{fold}'])
 
             # Save each epoch
             params.update({
-                'last_checkpoint': epoch
+                'last_checkpoint': f"{fold}_{epoch}"
             })
             save_yaml(params)
+
+            save_path = os.path.join(params['save_directory'], params['seq_type'])
+            os.makedirs(save_path, exist_ok=True)
             torch.save(model.state_dict(),
-                       os.path.join(params['save_directory'], f"{params['model_type']}_checkpoint_{epoch}_fold_{fold}.pt"))
+                       os.path.join(save_path, f"{params['model_type']}_{params['last_checkpoint']}.pt"))
 
             # Save best model
             if valid_roc > best_roc:
                 best_roc = valid_roc
                 torch.save(model.state_dict(),
-                           os.path.join(params['save_directory'], f"{params['model_type']}_checkpoint_{epoch}_fold_{fold}_best.pt"))
+                           os.path.join(save_path, f"{params['model_type']}_best.pt"))
         wandb.log({f"train_fold_loss": np.mean(history['train_epoch_loss'])})
         wandb.log({f"train_fold_acc": np.mean(history['train_epoch_acc'])})
         wandb.log({f"train_fold_roc": np.mean(history['train_epoch_roc'])})
@@ -258,6 +277,18 @@ def train_val_models(params: dict):
     return flair_model, t1w_model, t1wce_model, t2w_model
 
 
+def predict(params: dict):
+    params['seq_type'] = 'FLAIR'
+    flair_pred = load_model(params)
+    params['seq_type'] = 'T1w'
+    t1w_pred = load_model(params)
+    params['seq_type'] = 'T1wCE'
+    t1wce_pred = load_model(params)
+    params['seq_type'] = 'T2w'
+    t2w_pred = load_model(params)
+    return (flair_pred + t1w_pred + t1wce_pred + t2w_pred) / 4
+
+
 def load_model(params: dict):
     params['type'] = 'test'
     test_dataset = BrainTumorDataset(
@@ -272,26 +303,21 @@ def load_model(params: dict):
         shuffle=params['test_shuffle'],
         drop_last=params['test_drop_last'])
 
-    model = model_list.efficientnet_3d(params).cuda()
-    model.load_state_dict(
-        torch.load(f"{params['save_directory']}{params['model_type']}_checkpoint_{params['last_checkpoint']}.pt"))
+    model = model_list.efficientnet(params).cuda()
+    load_path = os.path.join(params['save_directory'], params['seq_type'], f"{params['model_type']}_best.pt")
+    # load_path = os.path.join(params['save_directory'], params['seq_type'], f"{params['model_type']}_4_19.pt")
+
+    model.load_state_dict(torch.load(load_path))
     model.cuda()
     model.eval()
 
-    idxs = []
-    preds = []
-
+    pred = pd.DataFrame(columns=['BraTS21ID', 'MGMT_value'])
     with torch.no_grad():
-        for inputs, idx in tqdm(test_loader):
+        for inputs, idx in tqdm(test_loader, desc=f"Prediction {params['seq_type']}"):
             inputs = inputs.cuda()
             output = model(inputs)
-            pred = torch.sigmoid(output).squeeze().cpu().numpy()
-            pred = pred[1]
-            # print(idx, pred)
-            idx = int(idx[0])
-
-            idxs.append(idx)
-            preds.append(pred)
-    preddf = pd.DataFrame({"BraTS21ID": idxs, "MGMT_value": preds})
-    preddf = preddf.set_index("BraTS21ID")
-    return preddf
+            pred = pred.append(pd.Series([idx.numpy(), torch.sigmoid(output).squeeze().cpu().numpy()[1]], index=pred.columns),
+                               ignore_index=True)
+        pred['BraTS21ID'] = pred['BraTS21ID'].astype(int)
+        pred = pred.set_index('BraTS21ID')
+    return pred

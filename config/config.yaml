@@ -1,7 +1,8 @@
 csv: train_labels.csv
 data_directory: dataset
-epochs: 20
+epochs: 30
 freeze_cnn: true
+fold_type: 'StratifiedKFold'
 grayscale: true
 input_channels: 1
 input_size: 256
@@ -25,7 +26,7 @@ num_workers: 0
 optimizer_type: Adam
 optimizer_weight_decay: 0.0005
 pin_memory: true
-sample_format: .png
+sample_format: .dcm # .png
 save_directory: models\experiments\
 schedule_type: StepLR
 seed: 42
