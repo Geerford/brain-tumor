@@ -180,12 +180,13 @@ def cross_validation(params: dict):
     else:
         splitter = KFold(n_splits=params['k_fold'], shuffle=True,
                          random_state=params['seed']).split(np.arange(len(dataset)))
+    best_roc = 0.0
     for fold, (train_idx, valid_idx) in enumerate(splitter):
         wandb.init(
             project="RSNA-MICCAI",
             tags=["effnetb0"],
             group=params['seq_type'],
-            notes=f"cross-validation each model",
+            notes=f"KFold",
             job_type=f"fold{fold + 1}",
             config=params)
         print(f'\033[4mFold {fold + 1}\033[0m')
@@ -211,7 +212,6 @@ def cross_validation(params: dict):
             'valid_epoch_roc': []
         }
 
-        best_roc = 0.0
         print(f'\n\033[4m{"Epoch": <50}{"Loss": >42}{"Accuracy": >10}{"ROC": >5}{"": <1}\033[0m')
         for epoch in range(params['epochs']):
             train_loss, train_correct, train_roc = train_epoch(model, train_loader, criterion, optimizer)
@@ -262,19 +262,19 @@ def cross_validation(params: dict):
         wandb.log({f"valid_fold_roc": np.mean(history['valid_epoch_roc'])})
 
         wandb.finish()
-    return model
+    return
 
 
 def train_val_models(params: dict):
     params['seq_type'] = 'FLAIR'
-    flair_model = cross_validation(params)
+    cross_validation(params)
     params['seq_type'] = 'T1w'
-    t1w_model = cross_validation(params)
+    cross_validation(params)
     params['seq_type'] = 'T1wCE'
-    t1wce_model = cross_validation(params)
+    cross_validation(params)
     params['seq_type'] = 'T2w'
-    t2w_model = cross_validation(params)
-    return flair_model, t1w_model, t1wce_model, t2w_model
+    cross_validation(params)
+    return
 
 
 def predict(params: dict):
@@ -305,7 +305,6 @@ def load_model(params: dict):
 
     model = model_list.efficientnet(params).cuda()
     load_path = os.path.join(params['save_directory'], params['seq_type'], f"{params['model_type']}_best.pt")
-    # load_path = os.path.join(params['save_directory'], params['seq_type'], f"{params['model_type']}_4_19.pt")
 
     model.load_state_dict(torch.load(load_path))
     model.cuda()
@@ -316,7 +315,7 @@ def load_model(params: dict):
         for inputs, idx in tqdm(test_loader, desc=f"Prediction {params['seq_type']}"):
             inputs = inputs.cuda()
             output = model(inputs)
-            pred = pred.append(pd.Series([idx.numpy(), torch.sigmoid(output).squeeze().cpu().numpy()[1]], index=pred.columns),
+            pred = pred.append(pd.Series([idx[0], torch.sigmoid(output).squeeze().cpu().numpy()[1]], index=pred.columns),
                                ignore_index=True)
         pred['BraTS21ID'] = pred['BraTS21ID'].astype(int)
         pred = pred.set_index('BraTS21ID')

@@ -70,15 +70,9 @@ def read_image(path):
     # Save png to storage
     png_path = path[:-4] + '.png'
     imageio.imsave(png_path, sample)
-    # sample = Image.open(png_path)
-    # sample = sample.resize((size, size), Image.BILINEAR)
-    # if mode == 'grayscale':
-    #     # sample = cv2.imread(path, 0)
-    #     sample = ImageOps.grayscale(sample)
-    # else:
-    #     sample = cv2.imread(png_path)
-    # return cv2.resize(sample, (size, size))
+
     return Image.open(png_path)
+    # return Image.open(path)
 
 
 def load_seq_samples(seq_path, params: dict):
