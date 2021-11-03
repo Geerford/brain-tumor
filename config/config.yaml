@@ -1,7 +1,7 @@
 csv: train_labels.csv
 data_directory: dataset
-epochs: 30
-fold_type: 'StratifiedKFold'
+epochs: 20
+fold_type: StratifiedKFold
 freeze_cnn: true
 grayscale: true
 input_channels: 1
@@ -41,5 +41,5 @@ train_directory: dataset\train\
 train_drop_last: true
 train_shuffle: true
 train_val_size: 0.2
-transform: false
+transform: true
 type: train

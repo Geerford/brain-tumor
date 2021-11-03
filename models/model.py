@@ -186,7 +186,7 @@ def cross_validation(params: dict):
             project="RSNA-MICCAI",
             tags=["effnetb0"],
             group=params['seq_type'],
-            notes=f"KFold",
+            notes=f"Extended_augmentation",
             job_type=f"fold{fold + 1}",
             config=params)
         print(f'\033[4mFold {fold + 1}\033[0m')

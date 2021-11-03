@@ -40,39 +40,44 @@ def transform_sample(sample, transform, size, grayscale):
         A.Resize(size, size)
     ])
     sample = resize_image(image=sample)['image']
-    sample = sample.reshape(in_channels, sample.shape[0], sample.shape[1])
     if transform:
         normalize = A.Normalize(mean=[0.5], std=[0.5]) if grayscale else A.Normalize(mean=[0.485, 0.456, 0.406],
                                                                                      std=[0.229, 0.224, 0.225])
         transform_image = A.Compose([
-            A.HorizontalFlip(p=0.5),
+            A.Affine(rotate=[-45, 45], p=0.5),
+            A.Affine(shear=5, p=0.5),
+            A.Affine(scale=1.12, p=0.5),
+            A.Flip(p=0.5),
+            A.RandomBrightnessContrast(brightness_limit=0.1, contrast_limit=0.1, p=0.2),
+            A.CoarseDropout(max_holes=1, max_height=16, max_width=16, p=0.5),
             A.OneOf([
+                A.MotionBlur(p=0.2),
+                A.MedianBlur(blur_limit=3, p=0.1),
                 A.GaussNoise(p=0.3),
-                A.Blur(blur_limit=3, p=0.2)
+                A.Blur(blur_limit=3, p=0.2),
             ], p=0.5),
-            normalize,
-            ToTensorV2()
+            normalize
         ])
-        return transform_image(image=sample)['image']
+        return torch.from_numpy(transform_image(image=sample)['image'].reshape(in_channels, sample.shape[0], sample.shape[1]))
     else:
-        return torch.from_numpy(sample)
+        return torch.from_numpy(sample.reshape(in_channels, sample.shape[0], sample.shape[1]))
 
 
 def read_image(path):
-    dicom = pydicom.read_file(path)
-    sample = apply_voi_lut(dicom.pixel_array, dicom)
-    if dicom.PhotometricInterpretation == "MONOCHROME1":
-        sample = np.amax(sample) - sample
-    sample = sample - np.min(sample)
-    with np.errstate(divide='ignore', invalid='ignore'):
-        sample = sample / np.max(sample)
-    sample = (sample * 255).astype(np.uint8)
-    # Save png to storage
-    png_path = path[:-4] + '.png'
-    imageio.imsave(png_path, sample)
-
-    return Image.open(png_path)
-    # return Image.open(path)
+    # dicom = pydicom.read_file(path)
+    # sample = apply_voi_lut(dicom.pixel_array, dicom)
+    # if dicom.PhotometricInterpretation == "MONOCHROME1":
+    #     sample = np.amax(sample) - sample
+    # sample = sample - np.min(sample)
+    # with np.errstate(divide='ignore', invalid='ignore'):
+    #     sample = sample / np.max(sample)
+    # sample = (sample * 255).astype(np.uint8)
+    # # Save png to storage
+    # png_path = path[:-4] + '.png'
+    # imageio.imsave(png_path, sample)
+    #
+    # return Image.open(png_path)
+    return Image.open(path)
 
 
 def load_seq_samples(seq_path, params: dict):

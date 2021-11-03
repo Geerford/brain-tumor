@@ -20,4 +20,7 @@ def main():
     set_seed(params['seed'])
     train_val_models(params)
     pred = predict(params)
-    pred.to_csv('submission.csv', index=False)
+    for n_pred in range(24):
+        pred += predict(params)
+    pred /= 25
+    pred.to_csv('submission.csv')
